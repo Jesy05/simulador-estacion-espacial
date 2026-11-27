@@ -228,7 +228,8 @@ class Resultado:
         estado_txt = (f"El robot permanece en ({fila}, {col}) con {e.energia} "
                       f"unidad{'es' if e.energia != 1 else ''} de energía y el módulo {e.modulo}.")
         if self.tipo == COMPLETADA:
-            return (f"{COMPLETADA} en ({fila}, {col}), con {e.energia} unidades de energía "
+            return (f"{COMPLETADA} en ({fila}, {col}), con {e.energia} "
+                    f"unidad{'es' if e.energia != 1 else ''} de energía "
                     f"y el módulo entregado.")
         if self.tipo == RECHAZADO:
             return (f"{RECHAZADO} en la línea {self.linea}: {self.motivo}. "
