@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Simulador · Estación espacial</title>
+  <meta name="description" content="Challenge #4: simulador de un robot que transporta un módulo espacial. Programa con bloques o con Python; el código se valida con ast.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="web/estilos.css">
+</head>
+<body>
+  <header class="cabecera">
+    <div>
+      <h1>Estación espacial · Transporte del módulo</h1>
+      <p>Programa con bloques o con Python · el código se valida con <code>ast</code> antes de ejecutarse</p>
+    </div>
+    <span id="estado-python" class="pildora cargando">Cargando Python…</span>
+  </header>
+
+  <main class="tablero">
+    <!-- Paleta de bloques -->
+    <section class="tarjeta paleta" id="paleta">
+      <h2>Bloques</h2>
+      <p class="suave">Clic para añadir al final o arrastra al programa.</p>
+      <div id="lista-paleta" class="lista-paleta"></div>
+      <div class="reglas suave">
+        <strong>Reglas</strong>
+        <ul>
+          <li>Inicio en (1, 1) con 8 de energía</li>
+          <li>Cada movimiento gasta 1</li>
+          <li><code>recoger()</code> en (1, 3)</li>
+          <li><code>entregar()</code> en (3, 4)</li>
+          <li>Obstáculos en (2, 3) y (4, 2)</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- Programa -->
+    <section class="centro">
+      <div class="pestanas">
+        <button class="pestana activa" data-vista="bloques" id="tab-bloques">🧩 Bloques</button>
+        <button class="pestana" data-vista="python" id="tab-python">🐍 Python</button>
+        <span id="aviso" class="aviso"></span>
+      </div>
+
+      <div class="tarjeta area-programa">
+        <div id="vista-bloques" class="vista-bloques">
+          <div class="sombrero">⚑ al iniciar la misión</div>
+          <ol id="programa" class="programa"></ol>
+          <p id="programa-vacio" class="suave vacio">Arrastra bloques aquí o haz clic en ellos.<br>
+            Arrastra un bloque fuera para borrarlo (o pulsa ✕).</p>
+        </div>
+        <div id="vista-python" class="vista-python" hidden>
+          <div class="editor">
+            <div id="numeros" class="numeros" aria-hidden="true"></div>
+            <div class="editor-cuerpo">
+              <pre id="resaltado" class="resaltado" aria-hidden="true"></pre>
+              <textarea id="codigo" spellcheck="false" autocapitalize="off" autocomplete="off"
+                        aria-label="Código Python de la misión"></textarea>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="controles">
+        <button id="btn-ejecutar" class="btn verde" disabled>▶ Ejecutar</button>
+        <button id="btn-detener" class="btn rojo">■ Detener</button>
+        <button id="btn-reiniciar" class="btn gris">↺ Reiniciar</button>
+        <button id="btn-borrar" class="btn gris">✕ Borrar</button>
+      </div>
+      <div class="controles">
+        <label>Caso de prueba
+          <select id="caso"><option value="">— elegir —</option></select>
+        </label>
+        <label>Velocidad
+          <input id="velocidad" type="range" min="1" max="4" step="0.5" value="2">
+        </label>
+      </div>
+
+      <section class="tarjeta registro">
+        <h2>Registro de acciones</h2>
+        <div id="registro" class="registro-lineas"></div>
+      </section>
+    </section>
+
+    <!-- Mapa y estado -->
+    <section class="derecha">
+      <div class="tarjeta">
+        <h2>Mapa de la estación <span class="suave">(fila, columna)</span></h2>
+        <svg id="mapa" viewBox="0 0 360 360" role="img" aria-label="Mapa 5 por 5 de la estación"></svg>
+      </div>
+      <div class="indicadores">
+        <div class="tarjeta indicador"><span>Posición</span><strong id="ind-pos">(1, 1)</strong></div>
+        <div class="tarjeta indicador"><span>Energía</span><strong id="ind-energia">8</strong></div>
+        <div class="tarjeta indicador"><span>Módulo</span><strong id="ind-modulo">disponible</strong></div>
+      </div>
+      <div id="resultado" class="resultado">Cargando el intérprete de Python…</div>
+    </section>
+  </main>
+
+  <footer class="pie suave">
+    Versión web: ejecuta el mismo <code>simulador.py</code> del repositorio con Python 3 en el navegador (Pyodide).
+    La versión de escritorio se abre con <code>python simulador.py</code>.
+  </footer>
+
+  <script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
+  <script src="web/app.js"></script>
+</body>
+</html>

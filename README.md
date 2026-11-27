@@ -12,7 +12,13 @@ ensamblaje. Recibe código Python, lo valida con `ast` y ejecuta las instruccion
 | `pruebas.py` | Ejecuta los seis casos de la guía y compara el resultado observado con el esperado. |
 | `evidencia_casos.md` | Salida de los seis casos (se genera con `python pruebas.py --md`). |
 
+| `index.html`, `web/` | Versión web (GitHub Pages). Ejecuta **el mismo `simulador.py`** con Python 3 dentro del navegador (Pyodide). |
+
 Solo necesita **Python 3** (tkinter viene incluido). No hay que instalar nada.
+
+**Versión web:** https://jesy05.github.io/simulador-estacion-espacial/ — la misma interfaz de bloques y Python,
+sin instalar nada. La validación y las reglas no están reescritas en JavaScript: la página descarga
+`simulador.py` y lo ejecuta con Python 3 (Pyodide).
 
 ## Cómo usarlo
 
