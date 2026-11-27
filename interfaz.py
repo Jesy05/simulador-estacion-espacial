@@ -3,18 +3,21 @@ Interfaz gráfica del simulador (tkinter, incluido con Python 3).
 
 Dos formas de programar la misión, siempre sincronizadas:
   * Bloques: arrastra o haz clic en los bloques de la izquierda para armar el programa.
-  * Python: escribe las llamadas mover(...), recoger() y entregar() en el editor.
+    Con «Crear función» armas tus propias funciones (cada una con su pila de bloques).
+  * Python: escribe mover(...), recoger(), entregar() y tus funciones con def.
 
 El código final SIEMPRE pasa por simulador.validar_codigo (ast) antes de ejecutarse.
 """
 
+import keyword
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, simpledialog, messagebox
 
-from simulador import (Simulador, validar_codigo, ErrorDeCodigo, ErrorDeAccion, Resultado, DIRECCIONES,
+from simulador import (Simulador, validar_codigo, analizar_programa, ErrorDeCodigo, ErrorDeAccion,
+                       Resultado, DIRECCIONES, FUNCIONES,
                        FILAS, COLUMNAS, OBSTACULOS, POS_MODULO, POS_ENTREGA, ENERGIA_INICIAL,
                        COMPLETADA, INCOMPLETA, DETENIDA, RECHAZADO, A_BORDO, ENTREGADO)
-from pruebas import CASOS
+from pruebas import TODOS as CASOS
 
 # ----------------------------------------------------------------------------
 # Estilo
@@ -47,13 +50,29 @@ SEP_BLOQUE = 4
 CELDA = 62
 
 
+MORADO = "#9333ea"
+ALTO_CABEZA = 36
+
+
 def clave_de(nombre, arg):
-    return arg if nombre == "mover" else nombre
+    if nombre == "mover":
+        return arg
+    if nombre in FUNCIONES:
+        return nombre
+    return "fn:" + nombre           # llamada a una función propia
+
+
+def info_bloque(clave):
+    """(texto, color, línea de Python) de un bloque."""
+    if clave.startswith("fn:"):
+        nombre = clave[3:]
+        return f"llamar  {nombre}()", MORADO, f"{nombre}()"
+    texto, color, (nombre, arg) = BLOQUES[clave]
+    return texto, color, (f'mover("{arg}")' if nombre == "mover" else f"{nombre}()")
 
 
 def linea_python(clave):
-    nombre, arg = BLOQUES[clave][2]
-    return f'mover("{arg}")' if nombre == "mover" else f"{nombre}()"
+    return info_bloque(clave)[2]
 
 
 def rect_redondo(canvas, x1, y1, x2, y2, r=10, **kw):
@@ -90,7 +109,9 @@ class App:
             pass
 
         self.sim = Simulador()
-        self.programa = []          # lista de claves de bloque: "este", "recoger", ...
+        self.principal = []         # claves de bloque del programa principal: "este", "recoger", "fn:x"...
+        self.funciones = []         # [{"nombre": str, "cuerpo": [claves]}]
+        self.disposicion = []       # posición de cada pila en el lienzo (se calcula al dibujar)
         self.vista = "bloques"      # "bloques" o "python"
         self.ejecutando = False
         self.tarea = None
@@ -157,10 +178,17 @@ class App:
             self.cv_paleta.create_text(20, y + ALTO_BLOQUE / 2 + 2, text=texto, anchor="w", fill="white",
                                        font=(FUENTE, 11, "bold"), tags=(etiqueta,))
             self.cv_paleta.tag_bind(etiqueta, "<ButtonPress-1>", lambda e, k=clave: self._paleta_presionar(e, k))
-            self.cv_paleta.tag_bind(etiqueta, "<B1-Motion>", self._paleta_mover)
-            self.cv_paleta.tag_bind(etiqueta, "<ButtonRelease-1>", self._paleta_soltar)
+            self.cv_paleta.tag_bind(etiqueta, "<B1-Motion>", self._arrastre_mover)
+            self.cv_paleta.tag_bind(etiqueta, "<ButtonRelease-1>", self._arrastre_soltar)
             self.cv_paleta.tag_bind(etiqueta, "<Enter>", lambda e: self.cv_paleta.configure(cursor="hand2"))
         self.cv_paleta.scale("all", 0, 0, self.S, self.S)
+
+        tk.Label(paleta, text="MIS FUNCIONES", bg=PANEL, fg=TEXTO_SUAVE, font=(FUENTE, 10, "bold"),
+                 anchor="w").pack(fill="x", padx=12, pady=(4, 0))
+        self.btn_nueva_funcion = self._boton(paleta, "＋  Crear función", self.crear_funcion, "#7c3aed")
+        self.btn_nueva_funcion.pack(fill="x", padx=12, pady=(4, 6))
+        self.cv_funciones = tk.Canvas(paleta, width=int(200 * self.S), height=1, bg=PANEL, highlightthickness=0)
+        self.cv_funciones.pack(padx=10)
 
         ayuda = ("Reglas\n• Inicio en (1, 1) con 8 de energía\n• Cada movimiento gasta 1\n"
                  "• recoger() en (1, 3)\n• entregar() en (3, 4)\n• Obstáculos en (2, 3) y (4, 2)")
@@ -209,6 +237,8 @@ class App:
         self.editor.tag_configure("error", background="#5a1f2a")
         self.editor.tag_configure("funcion", foreground="#7fb2ff")
         self.editor.tag_configure("cadena", foreground="#ffcf70")
+        self.editor.tag_configure("clave", foreground="#c084fc")
+        self.editor.tag_configure("comentario", foreground="#6b7aa6")
         self.editor.bind("<<Modified>>", self._editor_modificado)
 
         # controles
@@ -224,7 +254,7 @@ class App:
         ctrl2 = tk.Frame(centro, bg=FONDO)
         ctrl2.grid(row=3, column=0, sticky="ew", pady=(8, 0))
         tk.Label(ctrl2, text="Caso de prueba:", bg=FONDO, fg=TEXTO_SUAVE, font=(FUENTE, 10)).pack(side="left")
-        self.combo_caso = ttk.Combobox(ctrl2, values=[c[0] for c in CASOS], state="readonly", width=26)
+        self.combo_caso = ttk.Combobox(ctrl2, values=[c[0] for c in CASOS], state="readonly", width=38)
         self.combo_caso.pack(side="left", padx=6)
         self.combo_caso.bind("<<ComboboxSelected>>", lambda e: self.cargar_caso())
         tk.Label(ctrl2, text="Velocidad", bg=FONDO, fg=TEXTO_SUAVE, font=(FUENTE, 10)).pack(side="left", padx=(16, 4))
@@ -275,15 +305,13 @@ class App:
         if vista == "bloques" and self.vista == "python":
             # pasar de Python a bloques: el código debe ser válido
             try:
-                instrucciones = validar_codigo(self._texto_editor())
+                self._programa_desde_codigo(self._texto_editor())
             except ErrorDeCodigo as e:
                 self._aviso(f"No se puede pasar a bloques — línea {e.linea}: {e.motivo}")
                 self._marcar_linea_editor(e.linea, "error")
-                return
-            self.programa = [clave_de(i.nombre, i.argumentos[0] if i.argumentos else None) for i in instrucciones]
-            self.linea_a_bloque = {i.linea: n for n, i in enumerate(instrucciones)}
+                return False
         if vista == "python" and self.vista == "bloques":
-            self._poner_texto_editor(self._codigo_de_bloques())
+            self._poner_texto_editor(self._codigo_de_bloques()[0])
         self.vista = vista
         self._aviso("")
         self.marco_bloques.grid_forget()
@@ -298,12 +326,51 @@ class App:
                             else (self.btn_vista_python, self.btn_vista_bloques))
         activo.configure(bg=ACENTO)
         inactivo.configure(bg=PANEL_2)
+        return True
+
+    def _lista(self, pila):
+        if pila == "principal":
+            return self.principal
+        for f in self.funciones:
+            if "fn:" + f["nombre"] == pila:
+                return f["cuerpo"]
+        return None
 
     def _codigo_de_bloques(self):
-        return "\n".join(linea_python(k) for k in self.programa)
+        """Genera el código Python y el mapa línea -> (pila, índice de bloque)."""
+        lineas, mapa = [], {}
+        for f in self.funciones:
+            lineas.append(f"def {f['nombre']}():")
+            if not f["cuerpo"]:
+                lineas.append("    pass")
+            for i, clave in enumerate(f["cuerpo"]):
+                lineas.append("    " + linea_python(clave))
+                mapa[len(lineas)] = ("fn:" + f["nombre"], i)
+            lineas.append("")
+        for i, clave in enumerate(self.principal):
+            lineas.append(linea_python(clave))
+            mapa[len(lineas)] = ("principal", i)
+        return "\n".join(lineas).rstrip("\n"), mapa
+
+    def _programa_desde_codigo(self, codigo):
+        """Usa analizar_programa (ast) para pasar de Python a bloques."""
+        prog = analizar_programa(codigo)
+        mapa = {}
+
+        def claves(llamadas, pila):
+            res = []
+            for i, ll in enumerate(llamadas):
+                mapa[ll.linea] = (pila, i)
+                res.append(clave_de(ll.nombre, ll.argumentos[0] if ll.argumentos else None))
+            return res
+
+        self.funciones = [{"nombre": f.nombre, "cuerpo": claves(f.llamadas, "fn:" + f.nombre)}
+                          for f in prog.funciones.values()]
+        self.principal = claves(prog.principal, "principal")
+        self.linea_a_bloque = mapa
 
     def _codigo_actual(self):
-        return self._codigo_de_bloques() if self.vista == "bloques" else self._texto_editor()
+        return self._codigo_de_bloques()[0] if self.vista == "bloques" else self._texto_editor()
 
     def _texto_editor(self):
         return self.editor.get("1.0", "end-1c")
@@ -321,7 +388,10 @@ class App:
     def _colorear(self):
         self.editor.tag_remove("funcion", "1.0", "end")
         self.editor.tag_remove("cadena", "1.0", "end")
-        for patron, tag in ((r"\m(mover|recoger|entregar)\M", "funcion"), (r'"[^"]*"', "cadena")):
+        self.editor.tag_remove("clave", "1.0", "end")
+        self.editor.tag_remove("comentario", "1.0", "end")
+        for patron, tag in ((r"\m(mover|recoger|entregar)\M", "funcion"), (r'"[^"]*"', "cadena"),
+                            (r"\m(def|pass)\M", "clave"), (r"#[^\n]*", "comentario")):
             inicio = "1.0"
             while True:
                 cuenta = tk.IntVar()
@@ -348,55 +418,109 @@ class App:
         self.lbl_aviso.configure(text=texto)
 
     # --- programa en bloques --------------------------------------------------
-    def _y_de_bloque(self, i):
-        return 58 + i * (ALTO_BLOQUE + SEP_BLOQUE)
+    PASO_BLOQUE = ALTO_BLOQUE + SEP_BLOQUE
+
+    def _calcular_disposicion(self):
+        """Ubica cada pila (funciones primero, como en el código, y luego el programa principal)."""
+        pilas = [("fn:" + f["nombre"], f["nombre"], f["cuerpo"]) for f in self.funciones]
+        pilas.append(("principal", "", self.principal))
+        y, disp = 12, []
+        for pila, titulo, cuerpo in pilas:
+            y0 = y + ALTO_CABEZA + 8
+            fin = y0 + max(1, len(cuerpo)) * self.PASO_BLOQUE
+            disp.append({"pila": pila, "titulo": titulo, "cuerpo": cuerpo, "y": y, "y0": y0, "fin": fin})
+            y = fin + 22
+        self.disposicion = disp
+        return y
 
     def _redibujar_programa(self, resaltado=None, error=False):
         cv = self.cv_prog
         cv.delete("all")
         ancho = max(cv.winfo_width() / self.S, 320)
-        rect_redondo(cv, 16, 12, 220, 48, r=14, fill="#7c3aed", outline="#a78bfa")
-        cv.create_text(30, 30, text="⚑  al iniciar la misión", anchor="w", fill="white", font=(FUENTE, 11, "bold"))
-        for i, clave in enumerate(self.programa):
-            texto, color, _ = BLOQUES[clave]
-            y = self._y_de_bloque(i)
-            etiqueta = f"blk{i}"
-            borde, grosor = aclarar(color, .35), 1
-            if resaltado == i:
-                borde, grosor = ("#ff5c5c" if error else "#ffffff"), 3
-            rect_redondo(cv, 28, y, ancho - 60, y + ALTO_BLOQUE, r=10, fill=color, outline=borde,
-                         width=grosor, tags=(etiqueta, "bloque"))
-            cv.create_text(40, y + ALTO_BLOQUE / 2, text=f"{i + 1:>2}", anchor="w", fill=aclarar(color, .6),
-                           font=(MONO, 10, "bold"), tags=(etiqueta, "bloque"))
-            cv.create_text(70, y + ALTO_BLOQUE / 2, text=texto, anchor="w", fill="white",
-                           font=(FUENTE, 11, "bold"), tags=(etiqueta, "bloque"))
-            cv.create_text(ancho - 78, y + ALTO_BLOQUE / 2, text="✕", fill="white",
-                           font=(FUENTE, 11, "bold"), tags=(f"del{i}",))
-            cv.tag_bind(f"del{i}", "<Button-1>", lambda e, k=i: self._borrar_bloque(k))
-            cv.tag_bind(etiqueta, "<ButtonPress-1>", lambda e, k=i: self._bloque_presionar(e, k))
-            cv.tag_bind(etiqueta, "<B1-Motion>", self._bloque_mover)
-            cv.tag_bind(etiqueta, "<ButtonRelease-1>", self._bloque_soltar)
-            cv.tag_bind(etiqueta, "<Button-3>", lambda e, k=i: self._borrar_bloque(k))
-        fin = self._y_de_bloque(len(self.programa))
-        if not self.programa:
-            cv.create_text(30, fin + 30, anchor="w", fill=TEXTO_SUAVE, font=(FUENTE, 10),
-                           text="Arrastra bloques aquí o haz clic en ellos.\n"
-                                "Arrastra un bloque fuera para borrarlo (o clic derecho / ✕).")
+        total = self._calcular_disposicion()
+        y_resaltado = None
+        for d in self.disposicion:
+            pila, y = d["pila"], d["y"]
+            if pila == "principal":
+                rect_redondo(cv, 16, y, 220, y + ALTO_CABEZA, r=14, fill="#7c3aed", outline="#a78bfa")
+                cv.create_text(30, y + ALTO_CABEZA / 2, text="⚑  al iniciar la misión", anchor="w", fill="white",
+                               font=(FUENTE, 11, "bold"))
+            else:
+                ancho_cab = 120 + 9 * len(d["titulo"])
+                rect_redondo(cv, 16, y, 16 + ancho_cab, y + ALTO_CABEZA, r=14, fill=MORADO, outline="#c084fc")
+                cv.create_text(30, y + ALTO_CABEZA / 2, text=f"función  {d['titulo']}()", anchor="w", fill="white",
+                               font=(FUENTE, 11, "bold"))
+                etq = f"delfn_{d['titulo']}"
+                cv.create_text(ancho_cab, y + ALTO_CABEZA / 2, text="✕", fill="white", font=(FUENTE, 11, "bold"),
+                               tags=(etq,))
+                cv.tag_bind(etq, "<Button-1>", lambda e, n=d["titulo"]: self.borrar_funcion(n))
+            if not d["cuerpo"]:
+                cv.create_text(36, d["y0"] + ALTO_BLOQUE / 2, anchor="w", fill=TEXTO_SUAVE, font=(FUENTE, 10),
+                               text=("Arrastra bloques aquí o haz clic en ellos (✕ o clic derecho para borrar)."
+                                     if pila == "principal" else "Arrastra aquí los bloques de esta función."))
+            for i, clave in enumerate(d["cuerpo"]):
+                texto, color, _ = info_bloque(clave)
+                yb = d["y0"] + i * self.PASO_BLOQUE
+                etiqueta = f"blk|{pila}|{i}"
+                borde, grosor = aclarar(color, .35), 1
+                if resaltado == (pila, i):
+                    borde, grosor = ("#ff5c5c" if error else "#ffffff"), 3
+                    y_resaltado = yb
+                rect_redondo(cv, 28, yb, ancho - 60, yb + ALTO_BLOQUE, r=10, fill=color, outline=borde,
+                             width=grosor, tags=(etiqueta,))
+                cv.create_text(40, yb + ALTO_BLOQUE / 2, text=f"{i + 1:>2}", anchor="w", fill=aclarar(color, .6),
+                               font=(MONO, 10, "bold"), tags=(etiqueta,))
+                cv.create_text(70, yb + ALTO_BLOQUE / 2, text=texto, anchor="w", fill="white",
+                               font=(FUENTE, 11, "bold"), tags=(etiqueta,))
+                etq_del = f"del|{pila}|{i}"
+                cv.create_text(ancho - 78, yb + ALTO_BLOQUE / 2, text="✕", fill="white",
+                               font=(FUENTE, 11, "bold"), tags=(etq_del,))
+                cv.tag_bind(etq_del, "<Button-1>", lambda e, p=pila, k=i: self._borrar_bloque(p, k))
+                cv.tag_bind(etiqueta, "<ButtonPress-1>", lambda e, p=pila, k=i: self._bloque_presionar(e, p, k))
+                cv.tag_bind(etiqueta, "<B1-Motion>", self._arrastre_mover)
+                cv.tag_bind(etiqueta, "<ButtonRelease-1>", self._arrastre_soltar)
+                cv.tag_bind(etiqueta, "<Button-3>", lambda e, p=pila, k=i: self._borrar_bloque(p, k))
         cv.scale("all", 0, 0, self.S, self.S)
-        cv.configure(scrollregion=(0, 0, ancho * self.S, (fin + 80) * self.S))
-        if resaltado is not None:
-            y = self._y_de_bloque(resaltado)
-            total = fin + 80
-            cv.yview_moveto(max(0, (y - 120) / total))
+        cv.configure(scrollregion=(0, 0, ancho * self.S, (total + 40) * self.S))
+        if y_resaltado is not None:
+            cv.yview_moveto(max(0, (y_resaltado - 120) / (total + 40)))
+        self._redibujar_paleta_funciones()
 
-    def _indice_insercion(self, y_canvas):
-        i = round((y_canvas / self.S - 58) / (ALTO_BLOQUE + SEP_BLOQUE))
-        return max(0, min(len(self.programa), i))
+    def _redibujar_paleta_funciones(self):
+        cv = self.cv_funciones
+        cv.delete("all")
+        for i, f in enumerate(self.funciones):
+            clave = "fn:" + f["nombre"]
+            texto, color, _ = info_bloque(clave)
+            y = 4 + i * (ALTO_BLOQUE + 12)
+            etq = f"pal_{clave}"
+            rect_redondo(cv, 6, y, 192, y + ALTO_BLOQUE + 2, r=10, fill=color, outline=aclarar(color, .35),
+                         width=1, tags=(etq,))
+            cv.create_text(20, y + ALTO_BLOQUE / 2 + 1, text=texto, anchor="w", fill="white",
+                           font=(FUENTE, 10, "bold"), tags=(etq,))
+            cv.tag_bind(etq, "<ButtonPress-1>", lambda e, k=clave: self._paleta_presionar(e, k))
+            cv.tag_bind(etq, "<B1-Motion>", self._arrastre_mover)
+            cv.tag_bind(etq, "<ButtonRelease-1>", self._arrastre_soltar)
+        alto = 4 + len(self.funciones) * (ALTO_BLOQUE + 12)
+        cv.configure(height=int(max(1, alto) * self.S))
+        cv.scale("all", 0, 0, self.S, self.S)
 
-    def _dibujar_marcador(self, indice):
+    def _destino(self, y_canvas):
+        """(pila, índice) donde caería un bloque soltado a esa altura del lienzo."""
+        y = y_canvas / self.S
+        elegido = self.disposicion[-1]
+        for d in self.disposicion:
+            if y <= d["fin"] + 11:
+                elegido = d
+                break
+        i = round((y - elegido["y0"]) / self.PASO_BLOQUE)
+        return elegido["pila"], max(0, min(len(elegido["cuerpo"]), i))
+
+    def _dibujar_marcador(self, pila, indice):
         cv = self.cv_prog
         cv.delete("marcador")
-        y = self._y_de_bloque(indice) - SEP_BLOQUE / 2
+        d = next(d for d in self.disposicion if d["pila"] == pila)
+        y = d["y0"] + indice * self.PASO_BLOQUE - SEP_BLOQUE / 2
         cv.create_line(24, y, max(cv.winfo_width() / self.S, 320) - 56, y, fill="#ffffff", width=3, tags=("marcador",))
         cv.scale("marcador", 0, 0, self.S, self.S)
 
@@ -408,7 +532,7 @@ class App:
         return dentro, cv.canvasy(y)
 
     def _crear_fantasma(self, clave, x_raiz, y_raiz):
-        texto, color, _ = BLOQUES[clave]
+        texto, color, _ = info_bloque(clave)
         g = tk.Toplevel(self.raiz)
         g.overrideredirect(True)
         g.attributes("-alpha", 0.85)
@@ -417,31 +541,40 @@ class App:
         g.geometry(f"+{x_raiz - 20}+{y_raiz - 16}")
         return g
 
-    # arrastre desde la paleta
+    # arrastre: desde la paleta (copia) o desde el programa (mueve / borra)
     def _paleta_presionar(self, e, clave):
         if self.ejecutando:
             return
         self.arrastre = {"origen": "paleta", "clave": clave, "x0": e.x_root, "y0": e.y_root,
                          "fantasma": None, "movido": False}
 
-    def _paleta_mover(self, e):
+    def _bloque_presionar(self, e, pila, indice):
+        if self.ejecutando:
+            return
+        self.arrastre = {"origen": "programa", "pila": pila, "indice": indice, "clave": self._lista(pila)[indice],
+                         "x0": e.x_root, "y0": e.y_root, "fantasma": None, "movido": False}
+
+    def _arrastre_mover(self, e):
         a = self.arrastre
         if not a:
             return
         if not a["movido"] and abs(e.x_root - a["x0"]) + abs(e.y_root - a["y0"]) > 6:
             a["movido"] = True
-            if self.vista != "bloques":
-                self._cambiar_vista("bloques")
+            if self.vista != "bloques" and not self._cambiar_vista("bloques"):
+                self.arrastre = None
+                return
             a["fantasma"] = self._crear_fantasma(a["clave"], e.x_root, e.y_root)
+            if a["origen"] == "programa":
+                self.cv_prog.itemconfigure(f"blk|{a['pila']}|{a['indice']}", stipple="gray50")
         if a["movido"]:
             a["fantasma"].geometry(f"+{e.x_root - 20}+{e.y_root - 16}")
             dentro, y = self._sobre_programa(e.x_root, e.y_root)
             if dentro:
-                self._dibujar_marcador(self._indice_insercion(y))
+                self._dibujar_marcador(*self._destino(y))
             else:
                 self.cv_prog.delete("marcador")
 
-    def _paleta_soltar(self, e):
+    def _arrastre_soltar(self, e):
         a, self.arrastre = self.arrastre, None
         if not a:
             return
@@ -449,73 +582,85 @@ class App:
             a["fantasma"].destroy()
         self.cv_prog.delete("marcador")
         if not a["movido"]:
-            self._agregar_bloque(a["clave"])
+            if a["origen"] == "paleta":
+                self._agregar_bloque(a["clave"])
             return
         dentro, y = self._sobre_programa(e.x_root, e.y_root)
-        if dentro:
-            self._agregar_bloque(a["clave"], self._indice_insercion(y))
-
-    # arrastre dentro del programa (reordenar / borrar)
-    def _bloque_presionar(self, e, indice):
-        if self.ejecutando:
-            return
-        self.arrastre = {"origen": "programa", "indice": indice, "x0": e.x_root, "y0": e.y_root,
-                         "fantasma": None, "movido": False}
-
-    def _bloque_mover(self, e):
-        a = self.arrastre
-        if not a:
-            return
-        if not a["movido"] and abs(e.x_root - a["x0"]) + abs(e.y_root - a["y0"]) > 6:
-            a["movido"] = True
-            a["fantasma"] = self._crear_fantasma(self.programa[a["indice"]], e.x_root, e.y_root)
-            self.cv_prog.itemconfigure(f"blk{a['indice']}", stipple="gray50")
-        if a["movido"]:
-            a["fantasma"].geometry(f"+{e.x_root - 20}+{e.y_root - 16}")
-            dentro, y = self._sobre_programa(e.x_root, e.y_root)
+        if a["origen"] == "paleta":
             if dentro:
-                self._dibujar_marcador(self._indice_insercion(y))
-            else:
-                self.cv_prog.delete("marcador")
-
-    def _bloque_soltar(self, e):
-        a, self.arrastre = self.arrastre, None
-        if not a or not a["movido"]:
+                self._agregar_bloque(a["clave"], *self._destino(y))
             return
-        a["fantasma"].destroy()
-        self.cv_prog.delete("marcador")
-        dentro, y = self._sobre_programa(e.x_root, e.y_root)
-        clave = self.programa.pop(a["indice"])
+        origen = self._lista(a["pila"])
+        clave = origen.pop(a["indice"])
         if dentro:
-            destino = self._indice_insercion(y)
-            if destino > a["indice"]:
+            pila, destino = self._destino(y)
+            if pila == a["pila"] and destino > a["indice"]:
                 destino -= 1
-            self.programa.insert(destino, clave)
+            self._lista(pila).insert(destino, clave)
         self._programa_cambiado()
 
-    def _agregar_bloque(self, clave, indice=None):
-        if indice is None:
-            self.programa.append(clave)
-        else:
-            self.programa.insert(indice, clave)
+    def _agregar_bloque(self, clave, pila="principal", indice=None):
         if self.vista == "python":
             # en la vista Python el clic agrega la línea al final del texto
             texto = self._texto_editor().rstrip("\n")
             self._poner_texto_editor((texto + "\n" if texto else "") + linea_python(clave))
             self.editor.see("end")
             return
+        lista = self._lista(pila)
+        if indice is None:
+            lista.append(clave)
+        else:
+            lista.insert(indice, clave)
         self._programa_cambiado()
 
-    def _borrar_bloque(self, indice):
+    def _borrar_bloque(self, pila, indice):
         if self.ejecutando:
             return
-        self.programa.pop(indice)
+        self._lista(pila).pop(indice)
+        self._programa_cambiado()
+
+    def crear_funcion(self):
+        if self.ejecutando:
+            return
+        if self.vista == "python" and not self._cambiar_vista("bloques"):
+            return
+        nombre = simpledialog.askstring("Crear función", "Nombre de la nueva función (por ejemplo: dar_vuelta):",
+                                        parent=self.raiz)
+        nombre = (nombre or "").strip()
+        if not nombre:
+            return
+        if not nombre.isidentifier():
+            self._aviso("Nombre no válido: usa letras, números y _ (sin espacios ni empezar con número).")
+            return
+        if keyword.iskeyword(nombre) or nombre in FUNCIONES or nombre == "print":
+            self._aviso(f"«{nombre}» es una palabra reservada.")
+            return
+        if any(f["nombre"] == nombre for f in self.funciones):
+            self._aviso(f"Ya existe la función {nombre}().")
+            return
+        self.funciones.append({"nombre": nombre, "cuerpo": []})
+        self._aviso("")
+        self._programa_cambiado()
+
+    def borrar_funcion(self, nombre):
+        if self.ejecutando:
+            return
+        clave = "fn:" + nombre
+        usos = self.principal.count(clave) + sum(f["cuerpo"].count(clave) for f in self.funciones)
+        if usos and not messagebox.askyesno("Borrar función",
+                                            f"{nombre}() se usa {usos} {'vez' if usos == 1 else 'veces'}. "
+                                            "¿Borrar la función y sus llamadas?", parent=self.raiz):
+            return
+        self.funciones = [f for f in self.funciones if f["nombre"] != nombre]
+        self.principal = [k for k in self.principal if k != clave]
+        for f in self.funciones:
+            f["cuerpo"] = [k for k in f["cuerpo"] if k != clave]
         self._programa_cambiado()
 
     def _programa_cambiado(self):
-        self.linea_a_bloque = {n + 1: n for n in range(len(self.programa))}
+        codigo, self.linea_a_bloque = self._codigo_de_bloques()
         self._redibujar_programa()
-        self._poner_texto_editor(self._codigo_de_bloques())
+        self._poner_texto_editor(codigo)
 
     # --- mapa ---------------------------------------------------------------
     def _centro(self, pos):
@@ -626,7 +771,7 @@ class App:
         self.ejecutando = ejecutando
         estado = "disabled" if ejecutando else "normal"
         for b in (self.btn_ejecutar, self.btn_reiniciar, self.btn_limpiar, self.btn_vista_bloques,
-                  self.btn_vista_python):
+                  self.btn_vista_python, self.btn_nueva_funcion):
             b.configure(state=estado)
         self.editor.configure(state=estado)
         self.combo_caso.configure(state="disabled" if ejecutando else "readonly")
@@ -644,12 +789,11 @@ class App:
     def ejecutar(self):
         if self.ejecutando:
             return
-        codigo = self._codigo_actual()
-        self.reiniciar()
-        if self.vista == "python":
-            self.linea_a_bloque = {}
+        if self.vista == "bloques":
+            codigo, self.linea_a_bloque = self._codigo_de_bloques()
         else:
-            self.linea_a_bloque = {n + 1: n for n in range(len(self.programa))}
+            codigo = self._texto_editor()
+        self.reiniciar()
         try:
             instrucciones = validar_codigo(codigo)
         except ErrorDeCodigo as e:
@@ -658,9 +802,7 @@ class App:
             self._resaltar(e.linea, error=True)
             self._mostrar_resultado(Resultado(RECHAZADO, e.linea, e.motivo, self.sim.estado))
             return
-        if self.vista == "python":
-            self.linea_a_bloque = {i.linea: n for n, i in enumerate(instrucciones)}
-        self._escribir_registro(f"Código válido: {len(instrucciones)} instrucciones.", "ok")
+        self._escribir_registro(f"Código válido: {len(instrucciones)} acciones.", "ok")
         self._habilitar(True)
         self._paso(instrucciones, 0)
 
@@ -680,7 +822,7 @@ class App:
         try:
             detalle = self.sim.ejecutar_instruccion(instr)
         except ErrorDeAccion as e:
-            self._escribir_registro(f"L{instr.linea}  {instr.como_texto()}  ✗ {e.motivo}", "error")
+            self._escribir_registro(f"L{instr.linea}  {instr.como_texto()}{instr.donde()}  ✗ {e.motivo}", "error")
             self._resaltar(instr.linea, error=True)
             destino = None
             if instr.nombre == "mover":
@@ -688,9 +830,10 @@ class App:
                 f, c = self.sim.estado.posicion
                 destino = (f + df, c + dc)
             self._dibujar_mapa(error_en=destino or self.sim.estado.posicion)
-            self._terminar(Resultado(DETENIDA, instr.linea, e.motivo, self.sim.estado), resaltar=False)
+            self._terminar(Resultado(DETENIDA, instr.linea, e.motivo, self.sim.estado, instr.donde()),
+                           resaltar=False)
             return
-        self._escribir_registro(f"L{instr.linea}  {detalle}", "ok" if instr.nombre != "mover" else None)
+        self._escribir_registro(f"L{instr.linea}  {detalle}{instr.donde()}", "ok" if instr.nombre != "mover" else None)
         self._actualizar_estado()
         destino = self._centro(self.sim.estado.posicion)
         if instr.nombre == "mover":
@@ -736,7 +879,7 @@ class App:
 
     def limpiar(self):
         self.reiniciar()
-        self.programa = []
+        self.principal, self.funciones = [], []
         self._programa_cambiado()
 
     def cargar_caso(self):
@@ -746,10 +889,9 @@ class App:
                 self.reiniciar()
                 self._poner_texto_editor("\n".join(lineas))
                 if self.vista == "bloques":
-                    # el caso 6 tiene una instrucción desconocida: solo se puede ver en Python
+                    # un caso con código inválido (por ejemplo el 6) solo se puede ver en Python
                     self.vista = "python"
-                    self._cambiar_vista("bloques")
-                    if self.vista == "python":
+                    if not self._cambiar_vista("bloques"):
                         self._cambiar_vista("python")
                         self._aviso("Este caso contiene código inválido: se muestra en la vista Python.")
                 self._escribir_registro(f"Caso cargado: {nombre}")

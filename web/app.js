@@ -1,16 +1,25 @@
 // Versión web del simulador.
-// Toda la lógica (validación con ast, reglas, mensajes) es la de simulador.py,
-// que se ejecuta con Python 3 dentro del navegador gracias a Pyodide.
+// Toda la lógica (validación con ast, funciones propias, reglas, mensajes) es la de
+// simulador.py, que se ejecuta con Python 3 dentro del navegador gracias a Pyodide.
 // Este archivo solo dibuja la interfaz: bloques, editor, mapa y registro.
 
-const BLOQUES = {
-  norte:    { texto: "mover ↑ norte",     tipo: "mover",    linea: 'mover("norte")' },
-  sur:      { texto: "mover ↓ sur",       tipo: "mover",    linea: 'mover("sur")' },
-  este:     { texto: "mover → este",      tipo: "mover",    linea: 'mover("este")' },
-  oeste:    { texto: "mover ← oeste",     tipo: "mover",    linea: 'mover("oeste")' },
-  recoger:  { texto: "recoger módulo",    tipo: "recoger",  linea: "recoger()" },
-  entregar: { texto: "entregar módulo",   tipo: "entregar", linea: "entregar()" },
+const PRIMITIVOS = {
+  norte:    { texto: "mover ↑ norte",   tipo: "mover",    linea: 'mover("norte")' },
+  sur:      { texto: "mover ↓ sur",     tipo: "mover",    linea: 'mover("sur")' },
+  este:     { texto: "mover → este",    tipo: "mover",    linea: 'mover("este")' },
+  oeste:    { texto: "mover ← oeste",   tipo: "mover",    linea: 'mover("oeste")' },
+  recoger:  { texto: "recoger módulo",  tipo: "recoger",  linea: "recoger()" },
+  entregar: { texto: "entregar módulo", tipo: "entregar", linea: "entregar()" },
 };
+
+// Un bloque se guarda como una "clave": "este", "recoger"... o "fn:nombre" para llamar a una función propia.
+function infoBloque(clave) {
+  if (clave.startsWith("fn:")) {
+    const nombre = clave.slice(3);
+    return { texto: `llamar ${nombre}()`, tipo: "llamada", linea: `${nombre}()` };
+  }
+  return PRIMITIVOS[clave];
+}
 
 const PUENTE_PY = `
 import json
@@ -25,12 +34,25 @@ def info():
         "filas": s.FILAS, "columnas": s.COLUMNAS, "inicio": list(s.INICIO),
         "modulo": list(s.POS_MODULO), "entrega": list(s.POS_ENTREGA),
         "obstaculos": [list(p) for p in sorted(s.OBSTACULOS)], "energia": s.ENERGIA_INICIAL,
-        "casos": [{"nombre": n, "codigo": "\\n".join(c), "esperado": e} for n, c, e, _ in pruebas.CASOS],
+        "casos": [{"nombre": n, "codigo": "\\n".join(c), "esperado": e} for n, c, e, _ in pruebas.TODOS],
     })
 
 def estado():
     e = sim.estado
     return {"pos": list(e.posicion), "energia": e.energia, "modulo": e.modulo}
+
+def _llamadas(lista):
+    return [{"nombre": l.nombre, "args": list(l.argumentos), "linea": l.linea} for l in lista]
+
+def estructura(codigo):
+    try:
+        p = s.analizar_programa(codigo)
+    except s.ErrorDeCodigo as e:
+        return json.dumps({"ok": False, "linea": e.linea, "motivo": e.motivo})
+    return json.dumps({"ok": True,
+        "funciones": [{"nombre": f.nombre, "linea": f.linea, "llamadas": _llamadas(f.llamadas)}
+                      for f in p.funciones.values()],
+        "principal": _llamadas(p.principal)})
 
 def preparar(codigo):
     global _instr
@@ -41,7 +63,8 @@ def preparar(codigo):
         r = s.Resultado(s.RECHAZADO, e.linea, e.motivo, sim.estado)
         return json.dumps({"ok": False, "linea": e.linea, "motivo": e.motivo, "mensaje": r.mensaje()})
     return json.dumps({"ok": True, "instr": [
-        {"linea": i.linea, "nombre": i.nombre, "args": list(i.argumentos), "texto": i.como_texto()}
+        {"linea": i.linea, "nombre": i.nombre, "args": list(i.argumentos), "texto": i.como_texto(),
+         "donde": i.donde(), "llamadas": [l for _, l in i.pila]}
         for i in _instr]})
 
 def paso(k):
@@ -49,7 +72,7 @@ def paso(k):
     try:
         detalle = sim.ejecutar_instruccion(i)
     except s.ErrorDeAccion as e:
-        r = s.Resultado(s.DETENIDA, i.linea, e.motivo, sim.estado)
+        r = s.Resultado(s.DETENIDA, i.linea, e.motivo, sim.estado, i.donde())
         return json.dumps({"ok": False, "motivo": e.motivo, "mensaje": r.mensaje(), "estado": estado()})
     out = {"ok": True, "detalle": detalle, "estado": estado(), "terminado": sim.terminado}
     if sim.terminado:
@@ -64,10 +87,16 @@ def reiniciar():
     return json.dumps(estado())
 `;
 
+const PALABRAS_RESERVADAS = new Set(("False None True and as assert async await break class continue def del elif " +
+  "else except finally for from global if import in is lambda nonlocal not or pass raise return try while with yield " +
+  "mover recoger entregar print").split(" "));
+
 const $ = (sel) => document.querySelector(sel);
 const app = {
-  py: null, info: null, programa: [], vista: "bloques",
-  ejecutando: false, temporizador: null, rastro: [], lineaABloque: {},
+  py: null, info: null,
+  prog: { funciones: [], principal: [] },   // funciones: [{nombre, cuerpo: [claves]}]
+  vista: "bloques", ejecutando: false, temporizador: null, rastro: [],
+  lineaABloque: {},                          // línea de código -> [pila, índice]
 };
 
 // ---------------------------------------------------------------------------
@@ -80,7 +109,7 @@ async function iniciar() {
   try {
     const py = await loadPyodide();
     for (const archivo of ["simulador.py", "pruebas.py"]) {
-      const texto = await (await fetch(archivo, { cache: "no-cache" })).text();
+      const texto = await (await fetch(archivo + "?v=" + Date.now(), { cache: "no-cache" })).text();
       py.FS.writeFile(archivo, texto);
     }
     py.runPython("import sys; sys.path.insert(0, '.')");
@@ -108,16 +137,66 @@ function llamarPy(nombre, ...args) {
 }
 
 // ---------------------------------------------------------------------------
-// Bloques
+// Modelo de bloques: pilas "principal" y "fn:nombre"
 // ---------------------------------------------------------------------------
-function crearBloque(clave, indice) {
-  const b = BLOQUES[clave];
-  const el = document.createElement(indice === undefined ? "div" : "li");
+function listaDe(pila) {
+  if (pila === "principal") return app.prog.principal;
+  const f = app.prog.funciones.find((f) => "fn:" + f.nombre === pila);
+  return f ? f.cuerpo : null;
+}
+
+function codigoDeBloques() {
+  // Genera el código Python y, de paso, qué línea corresponde a cada bloque.
+  const lineas = [], mapa = {};
+  for (const f of app.prog.funciones) {
+    lineas.push(`def ${f.nombre}():`);
+    if (!f.cuerpo.length) lineas.push("    pass");
+    f.cuerpo.forEach((clave, i) => {
+      lineas.push("    " + infoBloque(clave).linea);
+      mapa[lineas.length] = ["fn:" + f.nombre, i];
+    });
+    lineas.push("");
+  }
+  app.prog.principal.forEach((clave, i) => {
+    lineas.push(infoBloque(clave).linea);
+    mapa[lineas.length] = ["principal", i];
+  });
+  return { codigo: lineas.join("\n").replace(/\n+$/, ""), mapa };
+}
+
+function claveDeLlamada(l) {
+  if (l.nombre === "mover") return l.args[0];
+  if (l.nombre === "recoger" || l.nombre === "entregar") return l.nombre;
+  return "fn:" + l.nombre;
+}
+
+function programaDesdeCodigo(codigo) {
+  // Usa analizar_programa de simulador.py para pasar de Python a bloques.
+  const r = llamarPy("estructura", codigo);
+  if (!r.ok) return r;
+  const mapa = {};
+  app.prog = {
+    funciones: r.funciones.map((f) => ({
+      nombre: f.nombre,
+      cuerpo: f.llamadas.map((l, i) => { mapa[l.linea] = ["fn:" + f.nombre, i]; return claveDeLlamada(l); }),
+    })),
+    principal: r.principal.map((l, i) => { mapa[l.linea] = ["principal", i]; return claveDeLlamada(l); }),
+  };
+  app.lineaABloque = mapa;
+  return r;
+}
+
+// ---------------------------------------------------------------------------
+// Bloques (DOM)
+// ---------------------------------------------------------------------------
+function crearBloque(clave, pila, indice) {
+  const b = infoBloque(clave);
+  const enPrograma = pila !== undefined;
+  const el = document.createElement(enPrograma ? "li" : "div");
   el.className = `blk ${b.tipo}`;
   el.draggable = true;
   el.dataset.clave = clave;
-  if (indice !== undefined) {
-    el.dataset.indice = indice;
+  if (enPrograma) {
     el.innerHTML = `<span class="num">${indice + 1}</span><span class="txt">${b.texto}</span>` +
                    `<button class="borrar" title="Borrar bloque" aria-label="Borrar bloque">✕</button>`;
   } else {
@@ -126,41 +205,87 @@ function crearBloque(clave, indice) {
   return el;
 }
 
-function construirPaleta() {
-  const lista = $("#lista-paleta");
-  for (const clave of Object.keys(BLOQUES)) {
-    const el = crearBloque(clave);
-    el.addEventListener("click", () => agregarBloque(clave));
-    el.addEventListener("dragstart", (e) => {
-      e.dataTransfer.setData("text/plain", JSON.stringify({ origen: "paleta", clave }));
-      e.dataTransfer.effectAllowed = "copy";
-    });
-    lista.appendChild(el);
-  }
+function bloqueDePaleta(clave) {
+  const el = crearBloque(clave);
+  el.addEventListener("click", () => agregarBloque(clave));
+  el.addEventListener("dragstart", (e) => {
+    e.dataTransfer.setData("text/plain", JSON.stringify({ origen: "paleta", clave }));
+    e.dataTransfer.effectAllowed = "copy";
+  });
+  return el;
 }
 
-function renderPrograma(resaltado = null, error = false) {
-  const lista = $("#programa");
+function construirPaleta() {
+  const lista = $("#lista-paleta");
+  for (const clave of Object.keys(PRIMITIVOS)) lista.appendChild(bloqueDePaleta(clave));
+}
+
+function renderPaletaFunciones() {
+  const lista = $("#lista-funciones");
   lista.innerHTML = "";
-  app.programa.forEach((clave, i) => {
-    const el = crearBloque(clave, i);
-    if (resaltado === i) el.classList.add(error ? "error" : "actual");
-    el.querySelector(".borrar").addEventListener("click", (e) => { e.stopPropagation(); borrarBloque(i); });
+  for (const f of app.prog.funciones) lista.appendChild(bloqueDePaleta("fn:" + f.nombre));
+}
+
+function crearPila(pila, titulo, cuerpo, resaltado, error) {
+  const sec = document.createElement("section");
+  sec.className = "pila";
+  sec.dataset.pila = pila;
+  const cab = document.createElement("div");
+  if (pila === "principal") {
+    cab.className = "sombrero";
+    cab.textContent = "⚑ al iniciar la misión";
+  } else {
+    cab.className = "sombrero funcion";
+    cab.innerHTML = `<span>función <code>${titulo}()</code></span>` +
+                    `<button class="borrar-fn" title="Borrar función" aria-label="Borrar función">✕</button>`;
+    cab.querySelector(".borrar-fn").addEventListener("click", () => borrarFuncion(titulo));
+  }
+  sec.appendChild(cab);
+  const ol = document.createElement("ol");
+  ol.className = "programa";
+  cuerpo.forEach((clave, i) => {
+    const el = crearBloque(clave, pila, i);
+    if (resaltado && resaltado[0] === pila && resaltado[1] === i) el.classList.add(error ? "error" : "actual");
+    el.querySelector(".borrar").addEventListener("click", (e) => { e.stopPropagation(); borrarBloque(pila, i); });
     el.addEventListener("dragstart", (e) => {
       if (app.ejecutando) { e.preventDefault(); return; }
-      e.dataTransfer.setData("text/plain", JSON.stringify({ origen: "programa", indice: i }));
+      e.dataTransfer.setData("text/plain", JSON.stringify({ origen: "programa", pila, indice: i }));
       e.dataTransfer.effectAllowed = "move";
       requestAnimationFrame(() => el.classList.add("arrastrando"));
     });
     el.addEventListener("dragend", () => el.classList.remove("arrastrando"));
-    lista.appendChild(el);
+    ol.appendChild(el);
   });
-  $("#programa-vacio").hidden = app.programa.length > 0;
-  if (resaltado !== null) lista.children[resaltado]?.scrollIntoView({ block: "nearest" });
+  sec.appendChild(ol);
+  if (!cuerpo.length) {
+    const p = document.createElement("p");
+    p.className = "suave vacio";
+    p.innerHTML = pila === "principal"
+      ? "Arrastra bloques aquí o haz clic en ellos.<br>Arrastra un bloque fuera para borrarlo (o pulsa ✕)."
+      : "Arrastra aquí los bloques de esta función.";
+    sec.appendChild(p);
+  }
+  return sec;
 }
 
-function indiceInsercion(y) {
-  const items = [...$("#programa").querySelectorAll(".blk")];
+function renderPrograma(resaltado = null, error = false) {
+  const cont = $("#pilas");
+  cont.innerHTML = "";
+  for (const f of app.prog.funciones)
+    cont.appendChild(crearPila("fn:" + f.nombre, f.nombre, f.cuerpo, resaltado, error));
+  cont.appendChild(crearPila("principal", "", app.prog.principal, resaltado, error));
+  renderPaletaFunciones();
+  if (resaltado) cont.querySelector(".blk.actual, .blk.error")?.scrollIntoView({ block: "nearest" });
+}
+
+function pilaBajo(elemento) {
+  const sec = elemento.closest?.(".pila");
+  return sec ? sec.dataset.pila : null;
+}
+
+function indiceInsercion(pila, y) {
+  const sec = document.querySelector(`.pila[data-pila="${CSS.escape(pila)}"]`);
+  const items = [...sec.querySelectorAll(".blk")];
   for (let i = 0; i < items.length; i++) {
     const r = items[i].getBoundingClientRect();
     if (y < r.top + r.height / 2) return i;
@@ -168,41 +293,78 @@ function indiceInsercion(y) {
   return items.length;
 }
 
-function mostrarMarcador(indice) {
+function mostrarMarcador(pila, indice) {
   quitarMarcador();
-  const lista = $("#programa");
+  const sec = document.querySelector(`.pila[data-pila="${CSS.escape(pila)}"]`);
+  sec.classList.add("activa-destino");
+  const ol = sec.querySelector("ol");
   const m = document.createElement("li");
   m.className = "marcador";
-  const items = lista.querySelectorAll(".blk");
-  lista.insertBefore(m, items[indice] || null);
+  ol.insertBefore(m, ol.querySelectorAll(".blk")[indice] || null);
 }
-function quitarMarcador() { document.querySelectorAll(".marcador").forEach((m) => m.remove()); }
+function quitarMarcador() {
+  document.querySelectorAll(".marcador").forEach((m) => m.remove());
+  document.querySelectorAll(".activa-destino").forEach((s) => s.classList.remove("activa-destino"));
+}
 
-function agregarBloque(clave, indice) {
+function agregarBloque(clave, pila = "principal", indice) {
   if (app.ejecutando) return;
   if (app.vista === "python") {
     const t = $("#codigo").value.replace(/\n+$/, "");
-    ponerCodigo((t ? t + "\n" : "") + BLOQUES[clave].linea);
+    ponerCodigo((t ? t + "\n" : "") + infoBloque(clave).linea);
     return;
   }
-  if (indice === undefined) app.programa.push(clave);
-  else app.programa.splice(indice, 0, clave);
+  const lista = listaDe(pila);
+  if (indice === undefined) lista.push(clave);
+  else lista.splice(indice, 0, clave);
   programaCambiado();
 }
 
-function borrarBloque(i) {
+function borrarBloque(pila, i) {
   if (app.ejecutando) return;
-  app.programa.splice(i, 1);
+  listaDe(pila).splice(i, 1);
+  programaCambiado();
+}
+
+function moverBloque(desde, i, hacia, destino) {
+  const origen = listaDe(desde);
+  const [clave] = origen.splice(i, 1);
+  if (desde === hacia && destino > i) destino -= 1;
+  listaDe(hacia).splice(destino, 0, clave);
+  programaCambiado();
+}
+
+function crearFuncion() {
+  if (app.ejecutando) return;
+  if (app.vista === "python" && !cambiarVista("bloques")) return;
+  const nombre = (prompt("Nombre de la nueva función (por ejemplo: dar_vuelta)", "") || "").trim();
+  if (!nombre) return;
+  if (!/^[A-Za-z_áéíóúñÁÉÍÓÚÑ][\wáéíóúñÁÉÍÓÚÑ]*$/.test(nombre)) return aviso("Nombre no válido: usa letras, números y _ (sin espacios).");
+  if (PALABRAS_RESERVADAS.has(nombre)) return aviso(`«${nombre}» es una palabra reservada.`);
+  if (app.prog.funciones.some((f) => f.nombre === nombre)) return aviso(`Ya existe la función ${nombre}().`);
+  app.prog.funciones.push({ nombre, cuerpo: [] });
+  aviso("");
+  programaCambiado();
+}
+
+function borrarFuncion(nombre) {
+  if (app.ejecutando) return;
+  const usos = [app.prog.principal, ...app.prog.funciones.map((f) => f.cuerpo)]
+    .reduce((n, l) => n + l.filter((k) => k === "fn:" + nombre).length, 0);
+  if (usos && !confirm(`${nombre}() se usa ${usos} ${usos === 1 ? "vez" : "veces"}. ¿Borrar la función y sus llamadas?`)) return;
+  app.prog.funciones = app.prog.funciones.filter((f) => f.nombre !== nombre);
+  const quitar = (l) => l.filter((k) => k !== "fn:" + nombre);
+  app.prog.principal = quitar(app.prog.principal);
+  app.prog.funciones.forEach((f) => { f.cuerpo = quitar(f.cuerpo); });
   programaCambiado();
 }
 
 function programaCambiado() {
-  app.lineaABloque = Object.fromEntries(app.programa.map((_, i) => [i + 1, i]));
+  const { codigo, mapa } = codigoDeBloques();
+  app.lineaABloque = mapa;
   renderPrograma();
-  ponerCodigo(codigoDeBloques());
+  ponerCodigo(codigo);
 }
-
-function codigoDeBloques() { return app.programa.map((k) => BLOQUES[k].linea).join("\n"); }
 
 // ---------------------------------------------------------------------------
 // Editor de Python (textarea transparente sobre un fondo coloreado)
@@ -212,9 +374,14 @@ function escapar(t) { return t.replace(/&/g, "&amp;").replace(/</g, "&lt;").repl
 function pintarEditor(lineaMarcada = null, tipo = "actual") {
   const lineas = $("#codigo").value.split("\n");
   $("#resaltado").innerHTML = lineas.map((l, i) => {
-    let h = escapar(l)
-      .replace(/"[^"]*"/g, (m) => `<span class="str">${m}</span>`)
-      .replace(/\b(mover|recoger|entregar)\b/g, '<span class="fn">$1</span>');
+    let h = escapar(l);
+    const com = h.indexOf("#");
+    let comentario = "";
+    if (com >= 0 && !/"[^"]*#/.test(h.slice(0, com + 1))) { comentario = h.slice(com); h = h.slice(0, com); }
+    h = h.replace(/("""[^"]*"""|"[^"]*")/g, (m) => `<span class="str">${m}</span>`)
+         .replace(/\b(def|pass)\b/g, '<span class="kw">$1</span>')
+         .replace(/\b(mover|recoger|entregar)\b(?=\()/g, '<span class="fn">$1</span>');
+    if (comentario) h += `<span class="com">${comentario}</span>`;
     const cls = lineaMarcada === i + 1 ? ` ${tipo}` : "";
     return `<span class="linea${cls}">${h || " "}</span>`;
   }).join("");
@@ -240,17 +407,14 @@ function cambiarVista(vista) {
   if (vista === app.vista) return true;
   if (vista === "bloques") {
     if (!app.py) return false;
-    const r = llamarPy("preparar", $("#codigo").value);
-    llamarPy("reiniciar");
+    const r = programaDesdeCodigo($("#codigo").value);
     if (!r.ok) {
       aviso(`No se puede pasar a bloques — línea ${r.linea}: ${r.motivo}`);
       pintarEditor(r.linea, "error");
       return false;
     }
-    app.programa = r.instr.map((i) => (i.nombre === "mover" ? i.args[0] : i.nombre));
-    app.lineaABloque = Object.fromEntries(r.instr.map((i, n) => [i.linea, n]));
   } else {
-    ponerCodigo(codigoDeBloques());
+    ponerCodigo(codigoDeBloques().codigo);
   }
   mostrarVista(vista);
   return true;
@@ -267,15 +431,9 @@ function mostrarVista(vista) {
   if (vista === "bloques") renderPrograma(); else { pintarEditor(); $("#codigo").focus(); }
 }
 
-function codigoActual() { return app.vista === "bloques" ? codigoDeBloques() : $("#codigo").value; }
-
 function resaltar(linea, error = false) {
-  if (app.vista === "bloques") {
-    const i = linea == null ? null : app.lineaABloque[linea];
-    renderPrograma(i ?? null, error);
-  } else {
-    pintarEditor(linea, error ? "error" : "actual");
-  }
+  if (app.vista === "bloques") renderPrograma(linea == null ? null : app.lineaABloque[linea] || null, error);
+  else pintarEditor(linea, error ? "error" : "actual");
 }
 
 // ---------------------------------------------------------------------------
@@ -311,13 +469,11 @@ function dibujarMapa(estado, errorEn = null) {
     for (let c = 1; c <= inf.columnas; c++)
       svg("rect", { x: MARGEN + (c - 1) * CELDA + 3, y: MARGEN + (f - 1) * CELDA + 3, width: CELDA - 6, height: CELDA - 6, rx: 10, fill: "#1b2546", stroke: "#2a3766" }, m);
 
-  // entrega
   let [x, y] = centro(inf.entrega);
   svg("rect", { x: x - 27, y: y - 27, width: 54, height: 54, rx: 9, fill: "#0f2f22",
                 stroke: estado.modulo === "entregado" ? "#22c55e" : "#15803d", "stroke-width": 2, "stroke-dasharray": "5 3" }, m);
   svg("text", { x, y: y - 16, fill: "#86efac", "font-size": 8, "font-weight": 800, "text-anchor": "middle" }, m).textContent = "ENTREGA";
 
-  // obstáculos (asteroides)
   for (const p of inf.obstaculos) {
     [x, y] = centro(p);
     const g = svg("g", { transform: `translate(${x} ${y})` }, m);
@@ -326,12 +482,10 @@ function dibujarMapa(estado, errorEn = null) {
     svg("circle", { cx: 9, cy: 8, r: 5, fill: "#3a3e52" }, g);
   }
 
-  // rastro
   if (app.rastro.length > 1)
     svg("polyline", { points: app.rastro.map((p) => centro(p).join(",")).join(" "), fill: "none",
                       stroke: "#5b8cff", "stroke-width": 3, "stroke-dasharray": "6 5", "stroke-linecap": "round" }, m);
 
-  // módulo
   if (estado.modulo === "disponible") {
     [x, y] = centro(inf.modulo);
     dibujarModulo(m, x, y - 2, 0.85);
@@ -341,13 +495,11 @@ function dibujarMapa(estado, errorEn = null) {
     dibujarModulo(m, x, y + 6, 0.65);
   }
 
-  // marca de error
   if (errorEn && dentro(errorEn)) {
     [x, y] = centro(errorEn);
     svg("circle", { cx: x, cy: y, r: 27, fill: "none", stroke: "#ef4444", "stroke-width": 4 }, m);
   }
 
-  // robot
   [x, y] = centro(estado.pos);
   const r = svg("g", { class: "robot", style: `transform: translate(${x}px, ${y}px)` }, m);
   svg("rect", { x: -18, y: -15, width: 36, height: 34, rx: 9, fill: "#22d3ee", stroke: "#a5f3fc", "stroke-width": 2 }, r);
@@ -362,7 +514,6 @@ function dibujarMapa(estado, errorEn = null) {
 }
 
 function moverRobot(estado, ms) {
-  // anima el robot existente; luego se redibuja todo el mapa
   if (!app.robot) return dibujarMapa(estado);
   const [x, y] = centro(estado.pos);
   app.robot.style.setProperty("--dur", ms + "ms");
@@ -406,7 +557,7 @@ function demora() { return Math.round(700 / Number($("#velocidad").value)); }
 
 function habilitar(ejecutando) {
   app.ejecutando = ejecutando;
-  for (const id of ["#btn-ejecutar", "#btn-reiniciar", "#btn-borrar", "#tab-bloques", "#tab-python", "#caso"])
+  for (const id of ["#btn-ejecutar", "#btn-reiniciar", "#btn-borrar", "#tab-bloques", "#tab-python", "#caso", "#btn-nueva-funcion"])
     $(id).disabled = ejecutando;
   $("#codigo").readOnly = ejecutando;
 }
@@ -425,9 +576,15 @@ function reiniciar() {
 
 function ejecutar() {
   if (app.ejecutando || !app.py) return;
-  const codigo = codigoActual();
+  let codigo;
+  if (app.vista === "bloques") {
+    const g = codigoDeBloques();
+    codigo = g.codigo;
+    app.lineaABloque = g.mapa;
+  } else {
+    codigo = $("#codigo").value;
+  }
   reiniciar();
-  if (app.vista === "bloques") app.lineaABloque = Object.fromEntries(app.programa.map((_, i) => [i + 1, i]));
   const r = llamarPy("preparar", codigo);
   if (!r.ok) {
     registrar(`Código rechazado — línea ${r.linea}: ${r.motivo}`, "error");
@@ -436,8 +593,7 @@ function ejecutar() {
     mostrarResultado("detenida", r.mensaje);
     return;
   }
-  if (app.vista === "python") app.lineaABloque = Object.fromEntries(r.instr.map((i, n) => [i.linea, n]));
-  registrar(`Código válido: ${r.instr.length} instrucciones.`, "ok");
+  registrar(`Código válido: ${r.instr.length} acciones.`, "ok");
   habilitar(true);
   paso(r.instr, 0);
 }
@@ -449,7 +605,7 @@ function paso(instr, k) {
   resaltar(i.linea);
   const r = llamarPy("paso", k);
   if (!r.ok) {
-    registrar(`L${i.linea}  ${i.texto}  ✗ ${r.motivo}`, "error");
+    registrar(`L${i.linea}  ${i.texto}${i.donde}  ✗ ${r.motivo}`, "error");
     resaltar(i.linea, true);
     let destino = r.estado.pos;
     if (i.nombre === "mover") {
@@ -459,7 +615,7 @@ function paso(instr, k) {
     dibujarMapa(r.estado, destino);
     return terminar("detenida", r.mensaje, false);
   }
-  registrar(`L${i.linea}  ${r.detalle}`, i.nombre === "mover" ? "" : "ok");
+  registrar(`L${i.linea}  ${r.detalle}${i.donde}`, i.nombre === "mover" ? "" : "ok");
   actualizarIndicadores(r.estado);
   const ms = demora();
   if (i.nombre === "mover") {
@@ -514,7 +670,12 @@ function enlazarEventos() {
   $("#btn-ejecutar").addEventListener("click", ejecutar);
   $("#btn-detener").addEventListener("click", () => detener());
   $("#btn-reiniciar").addEventListener("click", reiniciar);
-  $("#btn-borrar").addEventListener("click", () => { reiniciar(); app.programa = []; programaCambiado(); });
+  $("#btn-nueva-funcion").addEventListener("click", crearFuncion);
+  $("#btn-borrar").addEventListener("click", () => {
+    reiniciar();
+    app.prog = { funciones: [], principal: [] };
+    programaCambiado();
+  });
   $("#caso").addEventListener("change", cargarCaso);
 
   const ta = $("#codigo");
@@ -523,17 +684,18 @@ function enlazarEventos() {
   ta.addEventListener("keydown", (e) => {
     if (e.key === "Tab") {
       e.preventDefault();
-      const p = ta.selectionStart;
-      ta.setRangeText("    ", p, ta.selectionEnd, "end");
+      ta.setRangeText("    ", ta.selectionStart, ta.selectionEnd, "end");
       pintarEditor();
     }
   });
 
-  // arrastrar y soltar en el programa
+  // arrastrar y soltar en las pilas (programa principal y funciones)
   const zona = $("#vista-bloques");
+  const pilaDestino = (e) => pilaBajo(e.target) || "principal";
   zona.addEventListener("dragover", (e) => {
     e.preventDefault();
-    mostrarMarcador(indiceInsercion(e.clientY));
+    const pila = pilaDestino(e);
+    mostrarMarcador(pila, indiceInsercion(pila, e.clientY));
   });
   zona.addEventListener("dragleave", (e) => { if (!zona.contains(e.relatedTarget)) quitarMarcador(); });
   zona.addEventListener("drop", (e) => {
@@ -541,11 +703,10 @@ function enlazarEventos() {
     quitarMarcador();
     let datos;
     try { datos = JSON.parse(e.dataTransfer.getData("text/plain")); } catch { return; }
-    const destino = indiceInsercion(e.clientY);
-    if (datos.origen === "paleta") return agregarBloque(datos.clave, destino);
-    const [clave] = app.programa.splice(datos.indice, 1);
-    app.programa.splice(destino > datos.indice ? destino - 1 : destino, 0, clave);
-    programaCambiado();
+    const pila = pilaDestino(e);
+    const destino = indiceInsercion(pila, e.clientY);
+    if (datos.origen === "paleta") return agregarBloque(datos.clave, pila, destino);
+    moverBloque(datos.pila, datos.indice, pila, destino);
   });
   // soltar un bloque del programa fuera de la zona = borrarlo
   document.addEventListener("dragover", (e) => e.preventDefault());
@@ -555,7 +716,7 @@ function enlazarEventos() {
     quitarMarcador();
     try {
       const datos = JSON.parse(e.dataTransfer.getData("text/plain"));
-      if (datos.origen === "programa") borrarBloque(datos.indice);
+      if (datos.origen === "programa") borrarBloque(datos.pila, datos.indice);
     } catch { /* no era un bloque */ }
   });
 }

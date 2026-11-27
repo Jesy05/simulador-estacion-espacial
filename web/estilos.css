@@ -61,6 +61,14 @@ h2 { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: v
 .blk.mover { background: var(--azul-bloque); }
 .blk.recoger { background: var(--naranja); }
 .blk.entregar { background: var(--verde); }
+.blk.llamada { background: #9333ea; }
+.btn.morado { background: #7c3aed; width: 100%; margin: 6px 0 4px; }
+.pila { margin-bottom: 18px; }
+.sombrero.funcion { background: #9333ea; border-color: #c084fc; display: inline-flex; align-items: center; gap: 10px; }
+.sombrero code { background: #00000030; color: #fff; }
+.sombrero .borrar-fn { background: none; border: 0; color: #fff; cursor: pointer; font-size: 15px; padding: 0 4px; border-radius: 6px; }
+.sombrero .borrar-fn:hover { background: #00000030; }
+.pila.activa-destino .programa { background: #ffffff08; border-radius: 10px; }
 .blk .num { font-family: var(--mono); font-size: 12px; opacity: .7; min-width: 18px; }
 .blk .txt { flex: 1; }
 .blk .borrar { background: none; border: 0; color: #fff; font-size: 16px; cursor: pointer; padding: 4px 6px; border-radius: 6px; }
@@ -107,6 +115,8 @@ h2 { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: v
 .resaltado .linea.error { background: #5a1f2a; }
 .resaltado .fn { color: #7fb2ff; }
 .resaltado .str { color: #ffcf70; }
+.resaltado .kw { color: #c084fc; font-weight: 600; }
+.resaltado .com { color: #6b7aa6; font-style: italic; }
 
 /* Controles */
 .controles { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }

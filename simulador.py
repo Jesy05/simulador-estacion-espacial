@@ -3,7 +3,8 @@ Simulador de la estación espacial — Challenge #4 (Transporte de componentes e
 
 Archivo principal. Contiene:
   * el modelo del robot y del mapa (Estado),
-  * la validación del código Python con ast (validar_codigo),
+  * la validación del código Python con ast (validar_codigo), que acepta las
+    acciones del robot y funciones propias definidas con def,
   * la ejecución de las acciones con sus reglas (Simulador),
   * el modo consola (python simulador.py --consola).
 
@@ -65,14 +66,43 @@ class Estado:
 
 @dataclass
 class Instruccion:
+    """Una acción básica (mover, recoger o entregar) lista para ejecutarse."""
     linea: int
     nombre: str
     argumentos: tuple
+    pila: tuple = ()        # ((función, línea donde se llamó), ...) si viene de una función propia
 
     def como_texto(self):
         if self.nombre == "mover":
             return f'mover("{self.argumentos[0]}")'
         return f"{self.nombre}()"
+
+    def donde(self):
+        """Texto que explica desde qué función propia viene la acción."""
+        if not self.pila:
+            return ""
+        funcion, linea_llamada = self.pila[-1]
+        return f" (dentro de {funcion}(), llamada en la línea {linea_llamada})"
+
+
+@dataclass
+class Llamada:
+    linea: int
+    nombre: str
+    argumentos: tuple
+
+
+@dataclass
+class FuncionPropia:
+    nombre: str
+    linea: int
+    llamadas: list
+
+
+@dataclass
+class Programa:
+    funciones: dict     # nombre -> FuncionPropia (en el orden en que se definieron)
+    principal: list     # llamadas del programa principal
 
 
 class ErrorDeCodigo(Exception):
@@ -95,53 +125,163 @@ class ErrorDeAccion(Exception):
 # ----------------------------------------------------------------------------
 # Validación previa con ast
 # ----------------------------------------------------------------------------
-def validar_codigo(codigo):
-    """Revisa TODO el código antes de ejecutar la primera acción.
+MAX_ACCIONES = 500      # límite para programas que, por funciones anidadas, crecen demasiado
 
-    Devuelve la lista de Instruccion. Si algo no es válido lanza ErrorDeCodigo
-    con el número de línea y el motivo.
+
+def _es_docstring(sentencia):
+    return (isinstance(sentencia, ast.Expr) and isinstance(sentencia.value, ast.Constant)
+            and isinstance(sentencia.value.value, str))
+
+
+def _revisar_llamada(sentencia, dentro_de=None):
+    """Comprueba que la sentencia sea una llamada directa y devuelve una Llamada.
+
+    Solo revisa la forma; si el nombre es una función propia se resuelve después.
     """
+    linea = sentencia.lineno
+    if not isinstance(sentencia, ast.Expr) or not isinstance(sentencia.value, ast.Call):
+        if dentro_de:
+            raise ErrorDeCodigo(linea, f"dentro de {dentro_de}() solo puede haber llamadas a "
+                                       "mover(), recoger(), entregar() o a otras funciones tuyas")
+        raise ErrorDeCodigo(linea, "solo se permiten llamadas a mover(), recoger() o entregar() "
+                                   "y definiciones de funciones con def")
+    llamada = sentencia.value
+    if not isinstance(llamada.func, ast.Name):
+        raise ErrorDeCodigo(linea, "instrucción desconocida")
+    nombre = llamada.func.id
+    if llamada.keywords:
+        raise ErrorDeCodigo(linea, f"{nombre}() no acepta argumentos con nombre")
+
+    if nombre not in FUNCIONES:
+        # puede ser una función propia: no lleva argumentos
+        if llamada.args:
+            raise ErrorDeCodigo(linea, f"{nombre}() no lleva argumentos (tus funciones no tienen parámetros)")
+        return Llamada(linea, nombre, ())
+
+    esperados = FUNCIONES[nombre]
+    if len(llamada.args) != esperados:
+        if esperados == 0:
+            raise ErrorDeCodigo(linea, f"{nombre}() no lleva argumentos")
+        raise ErrorDeCodigo(linea, f"{nombre}() necesita exactamente {esperados} argumento")
+    argumentos = []
+    for arg in llamada.args:
+        if not isinstance(arg, ast.Constant) or not isinstance(arg.value, str):
+            raise ErrorDeCodigo(linea, f"{nombre}() necesita un texto entre comillas")
+        if arg.value not in DIRECCIONES:
+            raise ErrorDeCodigo(linea, f"dirección «{arg.value}» no válida "
+                                       "(usa norte, sur, este u oeste)")
+        argumentos.append(arg.value)
+    return Llamada(linea, nombre, tuple(argumentos))
+
+
+def _revisar_funcion(nodo):
+    """Comprueba una definición def nombre(): ... y devuelve una FuncionPropia."""
+    linea = nodo.lineno
+    if isinstance(nodo, ast.AsyncFunctionDef):
+        raise ErrorDeCodigo(linea, "las funciones no pueden ser async")
+    if nodo.name in FUNCIONES:
+        raise ErrorDeCodigo(linea, f"no puedes redefinir {nodo.name}(): es una acción del robot")
+    a = nodo.args
+    if a.posonlyargs or a.args or a.kwonlyargs or a.vararg or a.kwarg:
+        raise ErrorDeCodigo(linea, f"{nodo.name}() no puede tener parámetros")
+    if nodo.decorator_list:
+        raise ErrorDeCodigo(linea, f"{nodo.name}() no puede tener decoradores")
+    if nodo.returns:
+        raise ErrorDeCodigo(linea, f"{nodo.name}() no puede tener anotación de retorno")
+    cuerpo = nodo.body[1:] if _es_docstring(nodo.body[0]) else nodo.body
+    llamadas = []
+    for sentencia in cuerpo:
+        if isinstance(sentencia, ast.Pass):
+            continue
+        if isinstance(sentencia, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            raise ErrorDeCodigo(sentencia.lineno, "no se permiten funciones dentro de otra función")
+        llamadas.append(_revisar_llamada(sentencia, dentro_de=nodo.name))
+    return FuncionPropia(nodo.name, linea, llamadas)
+
+
+def analizar_programa(codigo):
+    """Lee el código con ast y devuelve un Programa (funciones propias + programa principal)."""
     try:
         arbol = ast.parse(codigo)
     except SyntaxError as e:
         raise ErrorDeCodigo(e.lineno or 1, f"error de sintaxis ({e.msg})")
 
-    instrucciones = []
+    funciones, principal = {}, []
     for sentencia in arbol.body:
-        linea = sentencia.lineno
+        if isinstance(sentencia, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if sentencia.name in funciones:
+                raise ErrorDeCodigo(sentencia.lineno, f"la función {sentencia.name}() ya estaba definida "
+                                                      f"en la línea {funciones[sentencia.name].linea}")
+            funciones[sentencia.name] = _revisar_funcion(sentencia)
+        else:
+            principal.append(_revisar_llamada(sentencia))
 
-        # Solo se aceptan expresiones sueltas que sean una llamada: mover("este")
-        if not isinstance(sentencia, ast.Expr) or not isinstance(sentencia.value, ast.Call):
-            raise ErrorDeCodigo(linea, "solo se permiten llamadas a mover(), recoger() o entregar()")
+    # Los nombres usados deben existir. En el programa principal, como en Python,
+    # la función tiene que estar definida ANTES de la línea donde se llama.
+    def comprobar(llamada, dentro_de=None):
+        if llamada.nombre in FUNCIONES:
+            return
+        f = funciones.get(llamada.nombre)
+        if f is None:
+            raise ErrorDeCodigo(llamada.linea, f"instrucción desconocida «{llamada.nombre}»")
+        if dentro_de is None and f.linea > llamada.linea:
+            raise ErrorDeCodigo(llamada.linea, f"{llamada.nombre}() se usa antes de definirla "
+                                               f"(está en la línea {f.linea})")
 
-        llamada = sentencia.value
-        if not isinstance(llamada.func, ast.Name):
-            raise ErrorDeCodigo(linea, "instrucción desconocida")
+    for f in funciones.values():
+        for llamada in f.llamadas:
+            comprobar(llamada, dentro_de=f.nombre)
+    for llamada in principal:
+        comprobar(llamada)
 
-        nombre = llamada.func.id
-        if nombre not in FUNCIONES:
-            raise ErrorDeCodigo(linea, f"instrucción desconocida «{nombre}»")
+    # Una función no puede llamarse a sí misma, ni directa ni indirectamente.
+    estado = {}
 
-        if llamada.keywords:
-            raise ErrorDeCodigo(linea, f"{nombre}() no acepta argumentos con nombre")
+    def visitar(nombre, cadena):
+        estado[nombre] = "visitando"
+        for llamada in funciones[nombre].llamadas:
+            if llamada.nombre not in funciones:
+                continue
+            if estado.get(llamada.nombre) == "visitando":
+                ciclo = " → ".join(cadena + [nombre, llamada.nombre])
+                raise ErrorDeCodigo(llamada.linea, f"llamada circular entre funciones ({ciclo}): "
+                                                   "el robot nunca terminaría")
+            if llamada.nombre not in estado:
+                visitar(llamada.nombre, cadena + [nombre])
+        estado[nombre] = "lista"
 
-        esperados = FUNCIONES[nombre]
-        if len(llamada.args) != esperados:
-            if esperados == 0:
-                raise ErrorDeCodigo(linea, f"{nombre}() no lleva argumentos")
-            raise ErrorDeCodigo(linea, f"{nombre}() necesita exactamente {esperados} argumento")
+    for nombre in funciones:
+        if nombre not in estado:
+            visitar(nombre, [])
+    return Programa(funciones, principal)
 
-        argumentos = []
-        for arg in llamada.args:
-            if not isinstance(arg, ast.Constant) or not isinstance(arg.value, str):
-                raise ErrorDeCodigo(linea, f"{nombre}() necesita un texto entre comillas")
-            if arg.value not in DIRECCIONES:
-                raise ErrorDeCodigo(linea, f"dirección «{arg.value}» no válida "
-                                           "(usa norte, sur, este u oeste)")
-            argumentos.append(arg.value)
 
-        instrucciones.append(Instruccion(linea, nombre, tuple(argumentos)))
+def expandir(programa):
+    """Convierte el Programa en la lista plana de acciones básicas, en orden de ejecución."""
+    instrucciones = []
+
+    def agregar(llamada, pila):
+        if llamada.nombre in FUNCIONES:
+            instrucciones.append(Instruccion(llamada.linea, llamada.nombre, llamada.argumentos, pila))
+            if len(instrucciones) > MAX_ACCIONES:
+                raise ErrorDeCodigo(llamada.linea, f"el programa genera más de {MAX_ACCIONES} acciones")
+            return
+        for interna in programa.funciones[llamada.nombre].llamadas:
+            agregar(interna, pila + ((llamada.nombre, llamada.linea),))
+
+    for llamada in programa.principal:
+        agregar(llamada, ())
     return instrucciones
+
+
+def validar_codigo(codigo):
+    """Revisa TODO el código antes de ejecutar la primera acción.
+
+    Acepta llamadas a mover/recoger/entregar y funciones propias definidas con def
+    (sin parámetros) que agrupan esas llamadas. Devuelve la lista de Instruccion ya
+    expandida. Si algo no es válido lanza ErrorDeCodigo con la línea y el motivo.
+    """
+    return expandir(analizar_programa(codigo))
 
 
 # ----------------------------------------------------------------------------
@@ -192,7 +332,7 @@ class Simulador:
         """Ejecuta UNA instrucción ya validada. Lanza ErrorDeAccion si incumple una regla."""
         accion = getattr(self, instr.nombre)
         detalle = accion(*instr.argumentos)
-        self.estado.registro.append(f"Línea {instr.linea}: {detalle}")
+        self.estado.registro.append(f"Línea {instr.linea}: {detalle}{instr.donde()}")
         if self.estado.modulo == ENTREGADO:
             self.terminado = True
         return detalle
@@ -208,8 +348,9 @@ class Simulador:
             try:
                 self.ejecutar_instruccion(instr)
             except ErrorDeAccion as e:
-                self.estado.registro.append(f"Línea {instr.linea}: {instr.como_texto()} RECHAZADA ({e.motivo})")
-                return Resultado(DETENIDA, instr.linea, e.motivo, self.estado)
+                self.estado.registro.append(f"Línea {instr.linea}: {instr.como_texto()}{instr.donde()} "
+                                            f"RECHAZADA ({e.motivo})")
+                return Resultado(DETENIDA, instr.linea, e.motivo, self.estado, instr.donde())
             if self.terminado:
                 return Resultado(COMPLETADA, None, None, self.estado)
         return Resultado(INCOMPLETA, None, "el programa terminó antes de entregar el módulo", self.estado)
@@ -221,6 +362,7 @@ class Resultado:
     linea: int
     motivo: str
     estado: Estado
+    donde: str = ""     # " (dentro de f(), llamada en la línea N)" si el error vino de una función propia
 
     def mensaje(self):
         e = self.estado
@@ -235,7 +377,7 @@ class Resultado:
             return (f"{RECHAZADO} en la línea {self.linea}: {self.motivo}. "
                     f"No se ejecuta ninguna acción. El robot conserva el estado inicial.")
         if self.tipo == DETENIDA:
-            return f"{DETENIDA} en la línea {self.linea}: {self.motivo}. {estado_txt}"
+            return f"{DETENIDA} en la línea {self.linea}{self.donde}: {self.motivo}. {estado_txt}"
         return f"{INCOMPLETA}: {self.motivo}. {estado_txt}"
 
 

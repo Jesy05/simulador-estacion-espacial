@@ -7,7 +7,7 @@
   <meta name="description" content="Challenge #4: simulador de un robot que transporta un módulo espacial. Programa con bloques o con Python; el código se valida con ast.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="web/estilos.css?v=2">
+  <link rel="stylesheet" href="web/estilos.css?v=3">
 </head>
 <body>
   <header class="cabecera">
@@ -24,6 +24,10 @@
       <h2>Bloques</h2>
       <p class="suave">Clic para añadir al final o arrastra al programa.</p>
       <div id="lista-paleta" class="lista-paleta"></div>
+      <h2>Mis funciones</h2>
+      <p class="suave">Crea una función, arma su pila de bloques y úsala con su bloque «llamar».</p>
+      <button id="btn-nueva-funcion" class="btn morado">＋ Crear función</button>
+      <div id="lista-funciones" class="lista-paleta"></div>
       <div class="reglas suave">
         <strong>Reglas</strong>
         <ul>
@@ -46,10 +50,7 @@
 
       <div class="tarjeta area-programa">
         <div id="vista-bloques" class="vista-bloques">
-          <div class="sombrero">⚑ al iniciar la misión</div>
-          <ol id="programa" class="programa"></ol>
-          <p id="programa-vacio" class="suave vacio">Arrastra bloques aquí o haz clic en ellos.<br>
-            Arrastra un bloque fuera para borrarlo (o pulsa ✕).</p>
+          <div id="pilas"></div>
         </div>
         <div id="vista-python" class="vista-python" hidden>
           <div class="editor">
@@ -105,6 +106,6 @@
   </footer>
 
   <script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
-  <script src="web/app.js?v=2"></script>
+  <script src="web/app.js?v=3"></script>
 </body>
 </html>
